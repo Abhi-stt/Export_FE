@@ -40,8 +40,10 @@ export default function HomePage() {
 
   const checkBackendStatus = async () => {
     try {
-      // Use apiClient which handles environment variables automatically
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'}/health`.replace('/api/health', '/health'))
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'
+      console.log('🔍 Checking backend health at:', `${apiUrl}/health`)
+      
+      const response = await fetch(`${apiUrl}/health`)
       if (response.ok) {
         const data = await response.json()
         console.log('✅ Backend is online:', data)
