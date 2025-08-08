@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Shield, FileText, BarChart3, Users, Sparkles, CheckCircle, Globe, ArrowRight, Play, Loader2 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+import { apiClient } from "@/lib/api"
 
 // Demo credentials that match the backend database
 const DEMO_CREDENTIALS = {
@@ -39,7 +40,8 @@ export default function HomePage() {
 
   const checkBackendStatus = async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/health')
+      // Use apiClient which handles environment variables automatically
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'}/health`.replace('/api/health', '/health'))
       if (response.ok) {
         const data = await response.json()
         console.log('✅ Backend is online:', data)
@@ -49,7 +51,7 @@ export default function HomePage() {
         setBackendStatus('offline')
       }
     } catch (error) {
-      console.log('❌ Backend connection error:', error)
+      console.error('❌ Backend connection error:', error)
       setBackendStatus('offline')
     }
   }
@@ -70,7 +72,7 @@ export default function HomePage() {
       console.log('🔄 Starting login process...')
       console.log('📝 Login data:', { email })
 
-      const response = await fetch('http://localhost:5000/api/auth/login', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'}/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -216,7 +218,7 @@ export default function HomePage() {
         phone: "+91 98765 43210" // Default phone for demo
       })
 
-      const response = await fetch('http://localhost:5000/api/auth/register', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'}/auth/register`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
