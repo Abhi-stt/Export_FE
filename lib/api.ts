@@ -282,9 +282,16 @@ class ApiClient {
   // Document Processing endpoints
   async uploadDocument(formData: FormData): Promise<ApiResponse> {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    const uploadUrl = `${this.baseURL}/documents/upload`;
+    
+    console.log('🔄 Starting document upload:', {
+      url: uploadUrl,
+      hasToken: !!token,
+      formDataEntries: Array.from(formData.entries()).map(([key, value]) => [key, typeof value === 'object' ? 'File' : value])
+    });
     
     try {
-      const response = await fetch(`${this.baseURL}/documents/upload`, {
+      const response = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
           ...(token && { Authorization: `Bearer ${token}` }),
@@ -292,7 +299,15 @@ class ApiClient {
         body: formData,
       });
       
+      console.log('📡 Upload response received:', {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        headers: Object.fromEntries(response.headers.entries())
+      });
+      
       const data = await response.json();
+      console.log('📄 Upload response data:', data);
       
       if (!response.ok) {
         throw new Error(data.message || `HTTP error! status: ${response.status}`);
@@ -300,7 +315,11 @@ class ApiClient {
       
       return data;
     } catch (error) {
-      console.error('Document upload failed:', error);
+      console.error('❌ Document upload failed:', {
+        error: error,
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
       return {
         success: false,
         error: 'Upload failed',

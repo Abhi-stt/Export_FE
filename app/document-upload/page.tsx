@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { Upload, FileText, CheckCircle, AlertTriangle, X, Eye, Download, Brain, Zap } from "lucide-react"
+import { Upload, FileText, CheckCircle, AlertTriangle, X, Eye, Download, Brain, Zap, BookOpen, Copy } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { apiClient } from "@/lib/api"
 
@@ -38,6 +38,8 @@ interface UploadedFile {
   }
   complianceErrors?: any[]
   complianceCorrections?: any[]
+  hsCodeSuggestions?: any[]
+  hsCodeMetadata?: any
   ocrMetadata?: any
 }
 
@@ -49,6 +51,8 @@ export default function DocumentUpload() {
   const [previewFile, setPreviewFile] = useState<UploadedFile | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const { toast } = useToast()
+
+
 
   // No authentication required for document upload
 
@@ -67,11 +71,19 @@ export default function DocumentUpload() {
       }
 
       // Validate file type
-      const allowedTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+      const allowedTypes = [
+        'application/pdf', 
+        'image/jpeg', 
+        'image/jpg', 
+        'image/png', 
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // DOCX
+        'application/msword', // DOC
+        'text/plain' // TXT
+      ]
       if (!allowedTypes.includes(file.type)) {
         toast({
           title: "Unsupported File Type",
-          description: `File ${file.name} is not a supported format. Please upload PDF, JPG, PNG, or DOCX files.`,
+          description: `File ${file.name} is not a supported format. Please upload PDF, JPG, PNG, DOCX, DOC, or TXT files.`,
           variant: "destructive",
         })
         return
@@ -122,7 +134,15 @@ export default function DocumentUpload() {
       const data = await apiClient.uploadDocument(formData)
       console.log('📄 Upload response data:', data)
 
-      if (data.success !== false && data.document) {
+      // Robust, type-safe extraction of documentId from possible API response shapes
+      const documentId = (data && typeof data === 'object' && (
+        (data as any)?.data?.document?._id ||
+        (data as any)?.data?.document?.id ||
+        (data as any)?.document?._id ||
+        (data as any)?.document?.id
+      ));
+
+      if (data?.success !== false && documentId) {
         // Update file status to processing
         setFiles((prev) =>
           prev.map((f) =>
@@ -131,14 +151,14 @@ export default function DocumentUpload() {
                   ...f, 
                   status: "processing", 
                   progress: 50,
-                  documentId: data.document._id 
+                  documentId: documentId 
                 } 
               : f
           )
         )
 
         // Start polling for processing status
-        pollDocumentStatus(fileId, data.document._id)
+        pollDocumentStatus(fileId, documentId)
       } else {
         console.error('❌ Upload failed:', data)
         setFiles((prev) =>
@@ -184,6 +204,19 @@ export default function DocumentUpload() {
   }
 
   const pollDocumentStatus = async (fileId: string, documentId: string) => {
+    // Helper function for progress messages (scoped to polling function)
+    const getProgressMessage = (status: any) => {
+      if (status.extractedText && status.complianceAnalysis && status.hsCodeSuggestions > 0) {
+        return "Finalizing AI analysis and generating recommendations...";
+      } else if (status.extractedText && status.complianceAnalysis) {
+        return "Generating HS code suggestions...";
+      } else if (status.extractedText) {
+        return "Analyzing compliance and generating suggestions...";
+      } else {
+        return "Extracting text and analyzing document...";
+      }
+    };
+
     const pollInterval = setInterval(async () => {
       try {
         // Debug authentication
@@ -196,18 +229,34 @@ export default function DocumentUpload() {
         
         const response = await apiClient.getDocument(documentId)
 
-        if (response.success !== false && response.document) {
-          const document = response.document
+        if (response.success !== false && (response as any).document) {
+          const document = (response as any).document
 
-          // Update progress
-          console.log(`📊 Document status update for ${fileId}:`, {
+          // Update progress with real-time AI processing status
+          const processingStatus = {
             status: document.status,
             confidence: document.confidence,
             extractedText: !!document.extractedText,
             entities: document.entities?.length || 0,
             complianceAnalysis: !!document.complianceAnalysis,
-            aiProcessingResults: !!document.aiProcessingResults
-          })
+            aiProcessingResults: !!document.aiProcessingResults,
+            hsCodeSuggestions: document.hsCodeSuggestions?.length || 0,
+            missingFields: document.missingFields?.length || 0,
+            complianceErrors: document.complianceErrors?.length || 0,
+            complianceCorrections: document.complianceCorrections?.length || 0
+          }
+          
+          console.log(`📊 Document status update for ${fileId}:`, processingStatus)
+          
+          // Show real-time processing updates
+          if (document.status === 'processing') {
+            const progressMessage = getProgressMessage(processingStatus);
+            toast({
+              title: "AI Processing in Progress...",
+              description: progressMessage,
+              variant: "default",
+            });
+          }
           
           // Create analysis object from document data
           const analysis = {
@@ -218,6 +267,11 @@ export default function DocumentUpload() {
             complianceErrors: document.complianceErrors || [],
             complianceCorrections: document.complianceCorrections || [],
             complianceRecommendations: document.complianceRecommendations || [],
+            missingFields: document.missingFields || [],
+            completionGuide: document.completionGuide || { completed: [], missing: [], completionPercentage: 0 },
+            hsCodeSuggestions: document.hsCodeSuggestions || [],
+            hsCodeMetadata: document.hsCodeMetadata || {},
+            structuredData: document.structuredData,
             aiProcessingResults: document.aiProcessingResults
           }
           
@@ -231,7 +285,7 @@ export default function DocumentUpload() {
                     status: document.status,
                     analysis: analysis,
                     errors: document.complianceErrors || [],
-                    suggestions: document.complianceCorrections?.map(c => c.message) || [],
+                                                suggestions: document.complianceCorrections?.map((c: any) => c.message) || [],
                     // Add AI processing results
                     extractedText: document.extractedText,
                     entities: document.entities,
@@ -240,6 +294,8 @@ export default function DocumentUpload() {
                     complianceAnalysis: document.complianceAnalysis,
                     complianceErrors: document.complianceErrors,
                     complianceCorrections: document.complianceCorrections,
+                    hsCodeSuggestions: document.hsCodeSuggestions,
+                    hsCodeMetadata: document.hsCodeMetadata,
                     ocrMetadata: document.ocrMetadata
                   }
                 : f
@@ -318,6 +374,10 @@ export default function DocumentUpload() {
       complianceAnalysis: file.complianceAnalysis || null,
       complianceErrors: file.complianceErrors || [],
       complianceCorrections: file.complianceCorrections || [],
+      
+      // HS Code Information
+      hsCodeSuggestions: file.hsCodeSuggestions || [],
+      hsCodeMetadata: file.hsCodeMetadata || {},
       
       // Legacy fields for compatibility
       suggestions: file.suggestions || [],
@@ -413,17 +473,17 @@ export default function DocumentUpload() {
   }
 
   // Helper function to check if document has analysis data
-  const hasAnalysisData = (file: UploadedFile) => {
+  const hasAnalysisData = (file: UploadedFile): boolean => {
     // Check for real AI processing results
-    const hasExtractedText = !!file.extractedText
-    const hasEntities = !!file.entities && file.entities.length > 0
-    const hasStructuredData = !!file.structuredData
-    const hasComplianceAnalysis = !!file.complianceAnalysis
+    const hasExtractedText = !!file.extractedText;
+    const hasEntities = !!file.entities && file.entities.length > 0;
+    const hasStructuredData = !!file.structuredData;
+    const hasComplianceAnalysis = !!file.complianceAnalysis;
     
     // Check legacy analysis data for backward compatibility
-    const hasLegacyAnalysis = !!file.analysis?.extractedText || !!file.analysis?.content
+    const hasLegacyAnalysis = !!file.analysis?.extractedText || !!file.analysis?.content;
     
-    const hasData = hasExtractedText || hasEntities || hasStructuredData || hasComplianceAnalysis || hasLegacyAnalysis
+    const hasData = hasExtractedText || hasEntities || hasStructuredData || hasComplianceAnalysis || hasLegacyAnalysis;
     
     console.log(`🔍 Checking analysis data for ${file.name}:`, {
       hasExtractedText,
@@ -434,15 +494,15 @@ export default function DocumentUpload() {
       result: hasData,
       extractedText: !!file.extractedText,
       entitiesCount: file.entities?.length || 0
-    })
+    });
     
-    return hasData
-  }
+    return hasData;
+  };
 
   // Helper function to get button text based on status
-  const getButtonText = (status: any, defaultText: string) => {
-    return status === "processing" ? "Processing..." : defaultText
-  }
+  const getButtonText = (status: any, defaultText: string): string => {
+    return status === "processing" ? "Processing..." : defaultText;
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -578,12 +638,22 @@ export default function DocumentUpload() {
                                 AI Processing Completed
                               </h4>
                               <p className="text-sm text-green-700 mb-1">
-                                Document processed with Gemini 1.5 Pro (OCR) + GPT-4 Turbo (Compliance)
+                                Document processed with Gemini 1.5 Pro (OCR) + {file.hsCodeMetadata?.provider || 'AI'} (Compliance)
                               </p>
                               <div className="grid grid-cols-2 gap-2 text-xs text-green-700">
                                 <div>OCR Confidence: {file.confidence ? (file.confidence * 100).toFixed(1) : 'N/A'}%</div>
                                 <div>Compliance Score: {file.complianceAnalysis?.score || 'N/A'}/100</div>
                               </div>
+                              
+                              {/* Show fallback warning if applicable */}
+                              {file.hsCodeMetadata?.fallbackUsed && (
+                                <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-700">
+                                  <div className="flex items-center gap-2">
+                                    <AlertTriangle className="h-3 w-3" />
+                                    <span><strong>Note:</strong> HS codes generated using fallback due to AI service issues</span>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                             {file.analysis.content && Object.keys(file.analysis.content).length > 0 && (
                               <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
@@ -763,26 +833,225 @@ export default function DocumentUpload() {
               <div>
                 <h3 className="text-lg font-semibold mb-3 flex items-center">
                   <Brain className="h-5 w-5 mr-2 text-blue-500" />
-                  Extracted OCR Text (Gemini 1.5 Pro)
+                  Extracted OCR Text (Gemini 1.5 Flash)
                 </h3>
-                <div className="bg-white border rounded-lg p-4 max-h-60 overflow-y-auto">
-                  <pre className="text-sm whitespace-pre-wrap font-mono">
-                    {previewFile.extractedText || "Processing... AI text extraction in progress"}
-                  </pre>
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-6 max-h-80 overflow-y-auto">
+                  <div className="text-sm leading-relaxed">
+                    {previewFile.extractedText ? (
+                      previewFile.extractedText.split('\n').map((line, index) => (
+                        <div key={index} className={`py-1 ${line.trim() ? '' : 'h-2'}`}>
+                          {line.trim() ? (
+                            <span className={`${
+                              line.match(/^[A-Z\s]+:/) ? 'font-bold text-blue-900 text-base' : 
+                              line.match(/^\d+\./) ? 'font-semibold text-blue-700' :
+                              line.match(/^[-•]\s/) ? 'text-gray-700 ml-4' :
+                              line.includes(':') ? 'font-medium text-gray-800' :
+                              'text-gray-700'
+                            }`}>
+                              {line}
+                            </span>
+                          ) : ''}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center text-gray-500 py-8">
+                        <Brain className="h-8 w-8 mx-auto mb-2 animate-pulse" />
+                        Processing... AI text extraction in progress
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
               {/* Structured Data */}
-              {previewFile.structuredData && (
+              {previewFile.structuredData && Object.keys(previewFile.structuredData).length > 0 && (
+                <div>
+                  <h3 className="text-lg font-semibold mb-3 flex items-center">
+                    <BookOpen className="h-5 w-5 mr-2 text-green-500" />
+                    Structured Data Extraction
+                  </h3>
+                  <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-6">
+                    
+                    {/* Document Header */}
+                    {previewFile.structuredData.documentHeader && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">📄 Document Information</h4>
+                        <div className="grid grid-cols-2 gap-4">
+                          {Object.entries(previewFile.structuredData.documentHeader).map(([key, value]) => (
+                            <div key={key} className="bg-white p-3 rounded border">
+                              <span className="text-xs font-medium text-green-600 uppercase tracking-wide">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                              <p className="text-sm font-semibold text-gray-800">{String(value)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Parties Information */}
+                    {previewFile.structuredData.parties && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">👥 Parties Information</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {Object.entries(previewFile.structuredData.parties).map(([partyType, partyData]) => (
+                            <div key={partyType} className="bg-white p-4 rounded border">
+                              <h5 className="font-semibold text-blue-700 mb-2 capitalize">{partyType}</h5>
+                              {typeof partyData === 'object' && partyData && Object.entries(partyData).map(([field, value]) => (
+                                <div key={field} className="mb-2">
+                                  <span className="text-xs text-gray-500 uppercase">{field.replace(/([A-Z])/g, ' $1').trim()}:</span>
+                                  <p className="text-sm text-gray-800">{String(value)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Items/Products */}
+                    {previewFile.structuredData.items && Array.isArray(previewFile.structuredData.items) && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">📦 Items/Products</h4>
+                        <div className="space-y-3">
+                          {previewFile.structuredData.items.map((item: any, index: number) => (
+                            <div key={index} className="bg-white p-4 rounded border">
+                              <div className="flex justify-between items-start mb-2">
+                                <h5 className="font-semibold text-blue-700">Item {index + 1}</h5>
+                                {item.hsCode && (
+                                  <Badge variant="outline" className="text-xs">
+                                    HS: {item.hsCode}
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                                {Object.entries(item).map(([field, value]) => (
+                                  <div key={field}>
+                                    <span className="text-xs text-gray-500 uppercase block">{field.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                    <p className="text-gray-800 font-medium">{String(value)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Totals */}
+                    {previewFile.structuredData.totals && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">💰 Financial Summary</h4>
+                        <div className="bg-white p-4 rounded border">
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            {Object.entries(previewFile.structuredData.totals).map(([key, value]) => (
+                              <div key={key} className="text-center">
+                                <span className="text-xs text-gray-500 uppercase block">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                <p className="text-lg font-bold text-green-700">{String(value)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Shipment Details */}
+                    {previewFile.structuredData.shipmentDetails && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">🚢 Shipment Information</h4>
+                        <div className="bg-white p-4 rounded border">
+                          <div className="grid grid-cols-2 gap-3">
+                            {Object.entries(previewFile.structuredData.shipmentDetails).map(([key, value]) => (
+                              <div key={key}>
+                                <span className="text-xs text-gray-500 uppercase">{key.replace(/([A-Z])/g, ' $1').trim()}:</span>
+                                <p className="text-sm text-gray-800 font-medium">{String(value)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Additional Information */}
+                    {previewFile.structuredData.additionalInfo && (
+                      <div className="mb-4">
+                        <h4 className="font-bold text-green-800 text-lg mb-3">ℹ️ Additional Information</h4>
+                        <div className="bg-white p-4 rounded border">
+                          {Object.entries(previewFile.structuredData.additionalInfo).map(([key, value]) => (
+                            <div key={key} className="mb-2">
+                              <span className="text-xs text-gray-500 uppercase">{key.replace(/([A-Z])/g, ' $1').trim()}:</span>
+                              <p className="text-sm text-gray-800">{Array.isArray(value) ? value.join(', ') : String(value)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Legacy Structured Data Display */}
+              {previewFile.structuredData && !previewFile.structuredData.documentHeader && (
                 <div>
                   <h3 className="text-lg font-semibold mb-3 flex items-center">
                     <Zap className="h-5 w-5 mr-2 text-green-500" />
                     Structured Data Extraction
                   </h3>
-                  <div className="bg-white border rounded-lg p-4 max-h-60 overflow-y-auto">
-                    <pre className="text-sm whitespace-pre-wrap font-mono">
-                      {JSON.stringify(previewFile.structuredData, null, 2)}
-                    </pre>
+                  <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-6 max-h-80 overflow-y-auto">
+                    <div className="space-y-4">
+                      {/* Document Type */}
+                      {previewFile.structuredData.documentType && (
+                        <div className="bg-white rounded-lg p-4 border border-green-100">
+                          <span className="text-sm font-medium text-green-700">Document Type:</span>
+                          <span className="ml-2 text-sm font-semibold text-gray-800 capitalize">
+                            {previewFile.structuredData.documentType}
+                          </span>
+                        </div>
+                      )}
+                      
+                      {/* Key Fields */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {Object.entries(previewFile.structuredData).map(([key, value]) => {
+                          if (key === 'documentType' || key === 'items' || key === 'entities') return null;
+                          
+                          return (
+                            <div key={key} className="bg-white rounded-lg p-3 border border-green-100">
+                              <div className="text-xs font-medium text-green-600 uppercase tracking-wide">
+                                {key.replace(/([A-Z])/g, ' $1').trim()}
+                              </div>
+                              <div className="text-sm font-medium text-gray-800 mt-1">
+                                {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      
+                      {/* Items/Products */}
+                      {previewFile.structuredData.items && (
+                        <div className="bg-white rounded-lg p-4 border border-green-100">
+                          <h4 className="text-sm font-semibold text-green-700 mb-3">Items/Products:</h4>
+                          <div className="space-y-2">
+                            {previewFile.structuredData.items.map((item: any, index: number) => (
+                              <div key={index} className="bg-gray-50 rounded p-3 border">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                                  <div>
+                                    <span className="font-medium text-gray-600">Description:</span>
+                                    <div className="text-gray-800">{item.description || item.name || 'N/A'}</div>
+                                  </div>
+                                  <div>
+                                    <span className="font-medium text-gray-600">Quantity:</span>
+                                    <div className="text-gray-800">{item.quantity || 'N/A'}</div>
+                                  </div>
+                                  <div>
+                                    <span className="font-medium text-gray-600">Price:</span>
+                                    <div className="text-gray-800">{item.unitPrice || item.totalPrice || 'N/A'}</div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -805,24 +1074,38 @@ export default function DocumentUpload() {
                 </div>
               )}
 
-              {/* Compliance Analysis */}
+              {/* Enhanced Compliance Analysis */}
               {previewFile.complianceAnalysis && (
                 <div>
                   <h3 className="text-lg font-semibold mb-3 flex items-center">
                     <CheckCircle className="h-5 w-5 mr-2 text-blue-500" />
-                    Compliance Analysis (GPT-4 Turbo)
+                    Compliance Analysis (AI-Powered)
                   </h3>
-                  <div className="bg-white border rounded-lg p-4">
-                    <div className="grid grid-cols-2 gap-4 mb-4">
-                      <div>
-                        <p className="text-sm font-medium text-gray-600">Validity</p>
-                        <Badge variant={previewFile.complianceAnalysis.isValid ? "default" : "destructive"}>
-                          {previewFile.complianceAnalysis.isValid ? "Valid" : "Invalid"}
-                        </Badge>
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-gray-600">Compliance Score</p>
-                        <p className="text-lg font-semibold">{previewFile.complianceAnalysis.score}/100</p>
+                  <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-6">
+                    
+                    {/* Overall Status Card */}
+                    <div className="bg-white rounded-lg p-4 mb-6 border-l-4 border-blue-500">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="text-center">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Overall Status</p>
+                          <Badge 
+                            variant={previewFile.complianceAnalysis.isValid ? "default" : "destructive"}
+                            className="text-sm px-3 py-1"
+                          >
+                            {(previewFile.complianceAnalysis as any)?.overallStatus || (previewFile.complianceAnalysis.isValid ? "COMPLIANT" : "NON-COMPLIANT")}
+                          </Badge>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Compliance Score</p>
+                          <p className="text-2xl font-bold text-blue-600">{previewFile.complianceAnalysis.score}%</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Document Status</p>
+                          <Badge variant="outline" className="text-sm">
+                            {(previewFile.complianceAnalysis as any)?.summary?.documentStatus || 
+                             (previewFile.complianceAnalysis.score > 80 ? "READY" : "NEEDS_WORK")}
+                          </Badge>
+                        </div>
                       </div>
                     </div>
                     
@@ -843,6 +1126,116 @@ export default function DocumentUpload() {
                 </div>
               )}
 
+              {/* Missing Fields & Completion Guide */}
+              {(previewFile.analysis?.missingFields && previewFile.analysis.missingFields.length > 0) && (
+                <div>
+                  <h3 className="text-lg font-semibold mb-3 text-orange-600 flex items-center">
+                    <AlertTriangle className="h-5 w-5 mr-2" />
+                    Missing Fields ({previewFile.analysis.missingFields.length})
+                  </h3>
+                  <div className="space-y-3">
+                                            {previewFile.analysis.missingFields.map((field: any, index: number) => (
+                      <div key={index} className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex-1">
+                            <p className="font-bold text-orange-800 text-base">{field.field}</p>
+                            <p className="text-sm text-orange-700 mb-2">{field.description}</p>
+                            <div className="bg-white rounded p-3 border border-orange-100">
+                              <p className="text-xs font-medium text-orange-600 mb-1">HOW TO ADD:</p>
+                              <p className="text-sm text-gray-800">{field.howToAdd}</p>
+                              {field.example && (
+                                <div className="mt-2">
+                                  <p className="text-xs font-medium text-orange-600">EXAMPLE:</p>
+                                  <p className="text-sm font-mono bg-gray-100 p-2 rounded mt-1">{field.example}</p>
+                                </div>
+                              )}
+                              {field.location && (
+                                <div className="mt-2">
+                                  <p className="text-xs font-medium text-orange-600">WHERE TO ADD:</p>
+                                  <p className="text-sm text-gray-700">{field.location}</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          <Badge variant={field.required ? "destructive" : "secondary"}>
+                            {field.required ? "Required" : "Optional"}
+                          </Badge>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Document Completion Guide */}
+              {(() => {
+                const completionGuide = previewFile.analysis?.completionGuide || { completed: [], missing: [], completionPercentage: 0 };
+                const hasData = completionGuide.completed.length > 0 || completionGuide.missing.length > 0;
+                
+                if (!hasData) return null;
+                
+                // Calculate completion percentage if not provided
+                let completionPercentage = completionGuide.completionPercentage || 0;
+                if (completionPercentage === 0) {
+                  const total = completionGuide.completed.length + completionGuide.missing.length;
+                  completionPercentage = total > 0 ? Math.round((completionGuide.completed.length / total) * 100) : 0;
+                }
+                
+                return (
+                  <div>
+                    <h3 className="text-lg font-semibold mb-3 text-green-600 flex items-center">
+                      <CheckCircle className="h-5 w-5 mr-2" />
+                      Document Completion Guide ({completionPercentage}% Complete)
+                    </h3>
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+                      <div className="mb-4">
+                        <div className="flex justify-between text-sm text-green-700 mb-1">
+                          <span>Completion Progress</span>
+                          <span>{completionPercentage}%</span>
+                        </div>
+                        <Progress 
+                          value={completionPercentage} 
+                          className="h-2"
+                        />
+                      </div>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Completed Fields */}
+                        {completionGuide.completed && completionGuide.completed.length > 0 && (
+                          <div>
+                            <h4 className="font-semibold text-green-700 mb-2">✅ Completed Fields</h4>
+                            <div className="space-y-2">
+                              {completionGuide.completed.map((item: any, index: number) => (
+                                <div key={index} className="bg-white rounded p-2 border border-green-100">
+                                  <p className="text-sm font-medium text-green-800">{item.field}</p>
+                                  <p className="text-xs text-green-600">{item.found}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Missing Fields */}
+                        {completionGuide.missing && completionGuide.missing.length > 0 && (
+                          <div>
+                            <h4 className="font-semibold text-red-700 mb-2">❌ Still Needed</h4>
+                            <div className="space-y-2">
+                              {completionGuide.missing.map((item: any, index: number) => (
+                                <div key={index} className="bg-red-50 rounded p-2 border border-red-100">
+                                  <p className="text-sm font-medium text-red-800">{item.field}</p>
+                                  <p className="text-xs text-red-600 mb-1">{item.needed}</p>
+                                  <p className="text-xs text-gray-600">💡 {item.instructions}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Compliance Errors & Corrections */}
               {(previewFile.complianceErrors && previewFile.complianceErrors.length > 0) && (
                 <div>
@@ -852,11 +1245,23 @@ export default function DocumentUpload() {
                   </h3>
                   <div className="space-y-3">
                     {previewFile.complianceErrors.map((error, index) => (
-                      <div key={index} className="bg-red-50 border border-red-200 rounded-lg p-3">
-                        <div className="flex justify-between items-start">
-                          <div>
+                      <div key={index} className="bg-red-50 border border-red-200 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex-1">
                             <p className="font-medium text-red-800">{error.field}</p>
-                            <p className="text-sm text-red-600">{error.message}</p>
+                            <p className="text-sm text-red-600 mb-2">{error.message}</p>
+                            {error.missingWhat && (
+                              <div className="bg-white rounded p-2 border border-red-100">
+                                <p className="text-xs font-medium text-red-600">MISSING:</p>
+                                <p className="text-sm text-gray-800">{error.missingWhat}</p>
+                                {error.howToAdd && (
+                                  <div className="mt-1">
+                                    <p className="text-xs font-medium text-red-600">HOW TO FIX:</p>
+                                    <p className="text-sm text-gray-700">{error.howToAdd}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                           <Badge variant="destructive">{error.severity}</Badge>
                         </div>
@@ -866,31 +1271,212 @@ export default function DocumentUpload() {
                 </div>
               )}
 
-              {/* AI Corrections & Suggestions */}
-              {(previewFile.complianceCorrections && previewFile.complianceCorrections.length > 0) && (
-                <div>
-                  <h3 className="text-lg font-semibold mb-3 text-blue-600 flex items-center">
-                    <Zap className="h-5 w-5 mr-2" />
-                    AI Suggestions
-                  </h3>
-                  <div className="space-y-3">
-                    {previewFile.complianceCorrections.map((correction, index) => (
-                      <div key={index} className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <p className="font-medium text-blue-800">{correction.field}</p>
-                            <p className="text-sm text-blue-600">{correction.message}</p>
-                            {correction.suggestion && (
-                              <p className="text-sm text-blue-500 mt-1">💡 {correction.suggestion}</p>
-                            )}
-                          </div>
-                          <Badge variant="secondary">{correction.priority}</Badge>
+
+
+              {/* HS Code Suggestions - Show placeholder while processing */}
+              <div>
+                <h3 className="text-lg font-semibold mb-3 text-purple-600 flex items-center">
+                  <BookOpen className="h-5 w-5 mr-2" />
+                  HS Code Suggestions
+                </h3>
+                {(() => {
+                  const hsCodeSuggestions = previewFile.analysis?.hsCodeSuggestions || previewFile.hsCodeSuggestions || [];
+                  
+                  if (previewFile.status === 'processing') {
+                    return (
+                      <div className="bg-purple-50 border border-purple-200 rounded-lg p-6">
+                        <div className="text-center text-purple-600">
+                          <BookOpen className="h-8 w-8 mx-auto mb-2 animate-pulse" />
+                          <p className="text-sm">AI is analyzing your document to generate HS code suggestions...</p>
+                          <p className="text-xs mt-1 text-purple-500">This may take a few moments</p>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                    );
+                  }
+                  
+                  if (hsCodeSuggestions.length === 0 && previewFile.status === 'completed') {
+                    return (
+                      <div className="bg-purple-50 border border-purple-200 rounded-lg p-6">
+                        <div className="text-center text-purple-600">
+                          <BookOpen className="h-8 w-8 mx-auto mb-2" />
+                          <p className="text-sm">AI is still analyzing this document for product classification.</p>
+                          <p className="text-xs mt-1 text-purple-500">HS codes will appear once processing is complete.</p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  if (hsCodeSuggestions.length > 0) {
+                    return (
+                      <div className="space-y-4">
+                        {hsCodeSuggestions.map(
+                          (productSuggestion: { productDescription: string; suggestions: any[]; reasoning?: string }, productIndex: number) => (
+                            <div key={productIndex} className="bg-gradient-to-r from-purple-50 to-violet-50 border border-purple-200 rounded-lg p-4">
+                              <div className="mb-3">
+                                <h4 className="font-semibold text-purple-800 text-sm">Product:</h4>
+                                <p className="text-sm text-gray-700 mt-1">{productSuggestion.productDescription}</p>
+                            </div>
+                            <div className="space-y-2">
+                              {productSuggestion.suggestions.map((suggestion: any, index: number) => (
+                                <div key={index} className="bg-white border border-purple-100 rounded-lg p-3">
+                                  <div className="flex justify-between items-start mb-2">
+                                    <div className="flex-1">
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="font-mono font-bold text-purple-700 text-lg">
+                                          {suggestion.code}
+                                        </span>
+                                        <Badge variant="outline" className="text-xs">
+                                          {suggestion.confidence}% confidence
+                                        </Badge>
+                                      </div>
+                                      <p className="text-sm text-gray-800 font-medium mb-1">
+                                        {suggestion.description}
+                                      </p>
+                                      <div className="flex gap-4 text-xs text-gray-600">
+                                        <span><strong>Category:</strong> {suggestion.category}</span>
+                                        <span><strong>Duty Rate:</strong> {suggestion.dutyRate}</span>
+                                      </div>
+                                    </div>
+                                    <Button 
+                                      size="sm" 
+                                      variant="outline"
+                                      onClick={() => navigator.clipboard.writeText(suggestion.code)}
+                                      className="ml-2"
+                                    >
+                                      <Copy className="h-3 w-3" />
+                                    </Button>
+                                  </div>
+                                  {suggestion.restrictions && suggestion.restrictions.length > 0 && (
+                                    <div className="mt-2 text-xs">
+                                      <span className="font-medium text-red-600">Restrictions:</span>
+                                      <ul className="list-disc list-inside text-red-500 mt-1">
+                                        {suggestion.restrictions.map((restriction: any, rIndex: number) => (
+                                          <li key={rIndex}>{restriction}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            {productSuggestion.reasoning && (
+                              <div className="mt-3 text-xs text-purple-600 bg-white rounded p-2 border border-purple-100">
+                                <strong>AI Reasoning:</strong> {productSuggestion.reasoning}
+                              </div>
+                            )}
+                            
+                            {/* Show AI provider and fallback status */}
+                            {previewFile.hsCodeMetadata && (
+                              <div className={`mt-3 text-xs rounded p-2 border ${
+                                previewFile.hsCodeMetadata.fallbackUsed 
+                                  ? 'bg-yellow-50 border-yellow-200 text-yellow-700' 
+                                  : 'bg-green-50 border-green-200 text-green-700'
+                              }`}>
+                                <div className="flex items-center gap-2">
+                                  {previewFile.hsCodeMetadata.fallbackUsed ? (
+                                    <>
+                                      <AlertTriangle className="h-3 w-3" />
+                                      <span><strong>Fallback Used:</strong> Primary AI failed, using intelligent keyword matching</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <CheckCircle className="h-3 w-3" />
+                                      <span><strong>AI Generated:</strong> Using {previewFile.hsCodeMetadata.provider || 'AI'} for real-time analysis</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
+                  
+                  return null;
+                })()}
+              </div>
+
+              {/* AI Corrections & Suggestions */}
+              <div>
+                <h3 className="text-lg font-semibold mb-3 text-blue-600 flex items-center">
+                  <Zap className="h-5 w-5 mr-2" />
+                  AI Suggestions & Corrections
+                </h3>
+                {(() => {
+                  const corrections = previewFile.analysis?.complianceCorrections || previewFile.complianceCorrections || [];
+                  
+                  if (previewFile.status === 'processing') {
+                    return (
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+                        <div className="text-center text-blue-600">
+                          <Zap className="h-8 w-8 mx-auto mb-2 animate-pulse" />
+                          <p className="text-sm">AI is analyzing your document for compliance and generating suggestions...</p>
+                          <p className="text-xs mt-1 text-blue-500">This includes error detection and auto-correction recommendations</p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  if (corrections.length === 0 && previewFile.status === 'completed') {
+                    return (
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+                        <div className="text-center text-blue-600">
+                          <Zap className="h-8 w-8 mx-auto mb-2" />
+                          <p className="text-sm">✅ No compliance issues detected - your document looks good!</p>
+                          <p className="text-xs mt-1 text-blue-500">AI analysis found no errors requiring correction</p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  if (corrections.length > 0) {
+                    return (
+                      <div className="space-y-3">
+                        {corrections.map((correction: any, index: number) => (
+                          <div key={index} className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex-1">
+                            <p className="font-bold text-blue-800 text-base">{correction.field}</p>
+                            <p className="text-sm text-blue-600 mb-2">{correction.message}</p>
+                            {correction.suggestion && (
+                              <div className="bg-white rounded p-3 border border-blue-100">
+                                <p className="text-xs font-medium text-blue-600 mb-1">💡 AI SUGGESTION:</p>
+                                <p className="text-sm text-gray-800">{correction.suggestion}</p>
+                                {correction.currentValue && (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-blue-600">CURRENT:</p>
+                                    <p className="text-sm text-gray-700">{correction.currentValue}</p>
+                                  </div>
+                                )}
+                                {correction.expectedFormat && (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-blue-600">EXPECTED FORMAT:</p>
+                                    <p className="text-sm text-gray-700">{correction.expectedFormat}</p>
+                                  </div>
+                                )}
+                                {correction.example && (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-blue-600">EXAMPLE:</p>
+                                    <p className="text-sm font-mono bg-gray-100 p-2 rounded">{correction.example}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          <Badge variant={correction.priority === 'high' ? 'destructive' : correction.priority === 'medium' ? 'default' : 'secondary'}>
+                            {correction.priority}
+                          </Badge>
+                        </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
+                  
+                  return null;
+                })()}
+              </div>
 
               {/* Document Content */}
               {previewFile.analysis?.content && (
@@ -939,7 +1525,7 @@ export default function DocumentUpload() {
                 </div>
               )}
               {/* Suggestions */}
-              {previewFile.analysis.suggestions && previewFile.analysis.suggestions.length > 0 && (
+              {previewFile.analysis?.suggestions && previewFile.analysis.suggestions.length > 0 && (
                 <div>
                   <h3 className="text-lg font-semibold mb-3">Suggestions</h3>
                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
@@ -978,5 +1564,5 @@ export default function DocumentUpload() {
         </DialogContent>
       </Dialog>
     </div>
-  )
+  );
 }
